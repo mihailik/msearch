@@ -1,4 +1,4 @@
-// @ts-check
+// @ts-check  NOT HTML  <script>
 
 if (!XMLHttpRequest.prototype.super_send) XMLHttpRequest.prototype.super_send = XMLHttpRequest.prototype.send;
 if (!XMLHttpRequest.prototype.super_open) XMLHttpRequest.prototype.super_open = XMLHttpRequest.prototype.open;
@@ -93,3 +93,5 @@ XMLHttpRequest.prototype.open = function xhrOpenOverride(method, url, async, use
   xhr.open_args = { method: method, url: url, async: async, user: user, password: password };
   xhr.super_open(method, url, async, user, password);
 };
+
+// </script>
