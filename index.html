@@ -1,97 +1,132 @@
 // @ts-check  NOT HTML  <script>
-
-if (!XMLHttpRequest.prototype.super_send) XMLHttpRequest.prototype.super_send = XMLHttpRequest.prototype.send;
-if (!XMLHttpRequest.prototype.super_open) XMLHttpRequest.prototype.super_open = XMLHttpRequest.prototype.open;
+(function(XHR) {
+  if (!XHR.prototype.super_send) XHR.prototype.super_send = XHR.prototype.send;
+  if (!XHR.prototype.super_open) XHR.prototype.super_open = XHR.prototype.open;
+  if (!XHR.prototype.super_setRequestHeader) XHR.prototype.super_setRequestHeader = XHR.prototype.setRequestHeader;
 
   /** @this {XMLHttpRequest} */
-XMLHttpRequest.prototype.send = function xhrSendOverride(body) {
-  var xhr = this;
-  if (!xhr.useRawNoRedirect) {
-    var searchText =
-      /^\/api\/v2\/search\?/.test(xhr.open_args && xhr.open_args.url || '') &&
-      (/[?&]q=([^&]+)&/.exec(xhr.open_args.url) || [])[1];
-    if (searchText) {
-      // when it's ready, just return after here
-      handleSearchRequest(searchText);
-    } else {
-      console.log('API ', xhr.open_args, body);
+  XHR.prototype.send = function xhrSendOverride(body) {
+    var xhr = this;
+    if (!xhr.useRawNoRedirect) {
+      var searchText =
+        /^\/api\/v2\/search\?/.test(xhr.open_args && xhr.open_args.url || '') &&
+        (/[?&]q=([^&]+)&/.exec(xhr.open_args.url) || [])[1];
+      if (searchText) {
+        // when it's ready, just return after here
+        return handleSearchRequest(searchText, xhr, body);
+      } else {
+        console.log('API ', xhr.open_args, body, xhr.requestHeaderList, xhr);
+      }
     }
-  }
-  xhr.super_send(body);
+    xhr.super_send(body);
 
-  /** @param {string} searchText */
-  function handleSearchRequest(searchText) {
+    /** @typedef {{ data: T[], more(): Promise<Feed<T>> }} Feed<T> */
 
-    /** @typedef {{
-     *  id: string // like 18-digit decimal number
-     *  account: MsAccount
-     *  bookmarked: boolean
-     *  card: any
-     *  content: string // HTML
-     *  created_at: string // '2023-01-16T16:09:57.973Z'
-     *  edited_at: string
-     *  emojis: any[]
-     *  favourited: boolean
-     *  favourites_count: number
-     *  filtered: any[]
-     *  in_reply_do_account_id: string | null
-     *  in_reply_to_id: string | null
-     *  language: null
-     *  media_attachments: any[]
-     *  mentions: MsAccount[]
-     *  muted: boolean
-     *  poll: any
-     *  reblog: MsBlog | undefined
-     *  reblogged: boolean
-     *  reblogs_count: number
-     *  replies_count: number
-     *  spoilter_text: string
-     *  tags: any[]
-     *  uri: string
-     *  url: string
-     * }} MsBlog */
+    async function handleSearchRequest(searchText, xhr) {
+      console.log('search:', JSON.stringify(searchText), xhr.open_args, body, xhr.requestHeaderList, xhr);
 
-    /** @typedef {{
-    * acct: string
-    * avatar: string
-    * avatar_static: string
-    * bot: boolean
-    * created_at: string // 2022-11-04T00:00:00.000Z
-    * discoverable: boolean
-    * display_name: string
-    * emojis: any[]
-    * fields: {name: string, value: string, verified_at: any}[]
-    * followers_count: number
-    * following_count: number
-    * group: boolean
-    * header: string
-    * header_static: string
-    * id: string // like 18-number decimal number
-    * last_status_at: string // 2023-01-16
-    * locked: boolean
-    * note: string // HTML
-    * statuses_count: number
-    * url: string // 'https://server/@account'
-    * username: string // 'account'
-    * }} MsAccount */
+      const q = searchText.replace(/\&/g, ' ');
 
-    /** @typedef {{
-     *  data: T[]
-     *  more: () => Promise<Feed<T>>
-     * }} Feed<T> */
+      const originalSearchPromise = 
+        fetch('/api/v2/search?resolve=true&q=' + q, { headers: xhr.requestHeaderList })
+
+      const tootFilter = toot =>
+        ((toot.content || '') + (toot.reblog?.content || '')).toLowerCase().indexOf(searchText.toLowerCase()) >= 0;
+
+      let timelineResult = await (await fetch('/api/v1/timelines/home', { headers: xhr.requestHeaderList })).json();
+
+      let searchResult;
+      try {
+        searchResult = await (await originalSearchPromise).json();
+        if (searchResult.error) throw new Error(searchResult.error);
+      } catch (authErr) {
+        searchResult = await (await
+          fetch('/api/v2/search?q=' + q, { headers: xhr.requestHeaderList })
+        );
+      }
+
+      const tootIdSet = {};
+      if (searchResult.statuses) {
+        for (const st of searchResult.statuses) {
+          tootIdSet[st.id] = true;
+        }
+      }
+
+      const MIN_MATCH = 10;
+      const MAX_REQUESTS = 50;
+      let reqCount = 1;
+      while (true) {
+        if (!timelineResult.length) break;
+
+        for (const st of timelineResult) {
+          if (tootFilter(st) && !tootIdSet[st.id]) {
+            tootIdSet[st.id] = true;
+            if (!searchResult.statuses) searchResult.statuses = [st];
+            else searchResult.statuses.push(st);
+          }
+        }
+
+        if (searchResult?.statuses.length >= MIN_MATCH) break;
+        if (reqCount >= MAX_REQUESTS) break;
+
+        try {
+          const edgeToot =
+            Number(timelineResult[timelineResult.length - 1].id) >
+              Number(timelineResult[0].id) ?
+              timelineResult[timelineResult.length - 1] :
+              timelineResult[0];
+
+          console.log('Need more timeline to top up matching ', searchResult?.statuses.length, ' to ', MIN_MATCH, ' searched up to ', edgeToot.created_at, '...');
+
+          const nextTimelineChunk = await (await fetch(
+            '/api/v1/timelines/home?max_id=' + edgeToot.id,
+            { headers: xhr.requestHeaderList })).json();
+          reqCount++;
+
+          timelineResult = nextTimelineChunk;
+        }
+        catch (err) {
+          // fail to download more timeline
+          break;
+        }
+      }
+
+      console.log(searchResult);
+
+      Object.defineProperty(xhr, 'response', {
+        get: () => JSON.stringify(searchResult)
+      });
+
+      Object.defineProperty(xhr, 'responseText', {
+        get: () => JSON.stringify(searchResult)
+      });
+
+      if (xhr.responseText !== JSON.stringify(searchResult))
+        console.log('difference!');
+
+      xhr.onloadend();
+    }
 
     /** @return {Promise<Feed<MsBlog>>} */
     function getHomefeed() {
-
+      // /api/v1/timelines/home
     }
-  }
-};
+  };
 
-/** @this {XMLHttpRequest} */
-XMLHttpRequest.prototype.open = function xhrOpenOverride(method, url, async, user, password) {
-  var xhr = this;
-  xhr.open_args = { method: method, url: url, async: async, user: user, password: password };
-  xhr.super_open(method, url, async, user, password);
-};
+  /** @this {XMLHttpRequest} */
+  XHR.prototype.open = function xhrOpenOverride(method, url, async, user, password) {
+    var xhr = this;
+    xhr.open_args = { method: method, url: url, async: async, user: user, password: password };
+    xhr.super_open(method, url, async, user, password);
+  };
 
+  /** @this {XMLHttpRequest} */
+  XHR.prototype.setRequestHeader = function xhrSetRequestHeaderOverride(header, value) {
+    var xhr = this;
+    if (!xhr.requestHeaderList) xhr.requestHeaderList = [];
+    xhr.requestHeaderList.push([header, value]);
+    xhr.super_setRequestHeader(header,value);
+  };
+
+})(XMLHttpRequest);
 // </script>
