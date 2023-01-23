@@ -6,43 +6,42 @@
 
   /** @this {XMLHttpRequest} */
   XHR.prototype.send = function xhrSendOverride(body) {
-    var xhr = this;
-    if (!xhr.useRawNoRedirect) {
-      var searchText =
-        /^\/api\/v2\/search\?/.test(xhr.open_args && xhr.open_args.url || '') &&
-        (/[?&]q=([^&]+)&/.exec(xhr.open_args.url) || [])[1];
-      if (searchText) {
-        // when it's ready, just return after here
-        return handleSearchRequest(searchText, xhr, body);
-      } else {
-        console.log('API ', xhr.open_args, body, xhr.requestHeaderList, xhr);
-      }
+    const xhr = this;
+    const searchText = !xhr.useRawNoRedirect
+      && /^\/api\/v2\/search\?/.test(xhr.open_args && xhr.open_args.url || '')
+      && (/[?&]q=([^&]+)&/.exec(xhr.open_args.url) || [])[1];
+    if (!searchText) {
+      xhr.super_send(body);
+      console.log('API ', xhr.open_args, body, xhr.requestHeaderList, xhr);
+    } else {
+      // when it's ready, just return after here
+      return handleSearchRequest(searchText, xhr, body);
     }
-    xhr.super_send(body);
 
-    /** @typedef {{ data: T[], more(): Promise<Feed<T>> }} Feed<T> */
+    async function getApi(call) {
+      const res = await (await fetch('/api/' + call, { headers: xhr.requestHeaderList })).json();
+      if (res.error) throw new Error(res.error);
+      else return res;
+    }
 
     async function handleSearchRequest(searchText, xhr) {
       console.log('search:', JSON.stringify(searchText), xhr.open_args, body, xhr.requestHeaderList, xhr);
 
       const q = searchText.replace(/\&/g, ' ');
 
-      const originalSearchPromise = 
-        fetch('/api/v2/search?resolve=true&q=' + q, { headers: xhr.requestHeaderList })
+      const originalSearchPromise = getApi('v2/search?resolve=true&q=' + q);
 
       const tootFilter = toot =>
         ((toot.content || '') + (toot.reblog?.content || '')).toLowerCase().indexOf(searchText.toLowerCase()) >= 0;
 
-      let timelineResult = await (await fetch('/api/v1/timelines/home', { headers: xhr.requestHeaderList })).json();
+      let timelineResult = await getApi('v1/timelines/home');
 
       let searchResult;
       try {
-        searchResult = await (await originalSearchPromise).json();
+        searchResult = await originalSearchPromise;
         if (searchResult.error) throw new Error(searchResult.error);
       } catch (authErr) {
-        searchResult = await (await
-          fetch('/api/v2/search?q=' + q, { headers: xhr.requestHeaderList })
-        );
+        searchResult = await getApi('v2/search?q=' + q);
       }
 
       const tootIdSet = {};
@@ -78,9 +77,7 @@
 
           console.log('Need more timeline to top up matching ', searchResult?.statuses.length, ' to ', MIN_MATCH, ' searched up to ', edgeToot.created_at, '...');
 
-          const nextTimelineChunk = await (await fetch(
-            '/api/v1/timelines/home?max_id=' + edgeToot.id,
-            { headers: xhr.requestHeaderList })).json();
+          const nextTimelineChunk = await getApi('v1/timelines/home?max_id=' + edgeToot.id);
           reqCount++;
 
           timelineResult = nextTimelineChunk;
@@ -107,22 +104,18 @@
       xhr.onloadend();
     }
 
-    /** @return {Promise<Feed<MsBlog>>} */
-    function getHomefeed() {
-      // /api/v1/timelines/home
-    }
   };
 
   /** @this {XMLHttpRequest} */
   XHR.prototype.open = function xhrOpenOverride(method, url, async, user, password) {
-    var xhr = this;
+    const xhr = this;
     xhr.open_args = { method: method, url: url, async: async, user: user, password: password };
     xhr.super_open(method, url, async, user, password);
   };
 
   /** @this {XMLHttpRequest} */
   XHR.prototype.setRequestHeader = function xhrSetRequestHeaderOverride(header, value) {
-    var xhr = this;
+    const xhr = this;
     if (!xhr.requestHeaderList) xhr.requestHeaderList = [];
     xhr.requestHeaderList.push([header, value]);
     xhr.super_setRequestHeader(header,value);
